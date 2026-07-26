@@ -1,4 +1,4 @@
-      - name: Desplegar Backend en EC2
+        - name: Desplegar Backend en EC2
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
@@ -9,34 +9,49 @@
 
           cd /home/ubuntu/Docker-Heladeria
 
-          compose() {
-            docker compose \
-              --env-file .env.aws \
-              -f docker-compose.aws.yml \
-              "$@"
-          }
+          echo "Descargando imagen latest del backend..."
 
-          echo "Descargando nueva imagen del backend..."
-          compose pull backend
+          docker compose \
+            --env-file .env.aws \
+            -f docker-compose.aws.yml \
+            pull backend
 
-          echo "Recreando contenedor del backend..."
-          compose up -d --no-deps --force-recreate backend
+          echo "Recreando el backend..."
+
+          docker compose \
+            --env-file .env.aws \
+            -f docker-compose.aws.yml \
+            up -d --no-deps --force-recreate backend
 
           echo "Esperando que el backend esté disponible..."
 
           for intento in $(seq 1 20); do
             if curl -fsS http://localhost:5000/api/sabores > /dev/null; then
               echo "Backend funcionando correctamente."
-              compose ps backend
+
+              docker compose \
+                --env-file .env.aws \
+                -f docker-compose.aws.yml \
+                ps backend
+
               exit 0
             fi
 
-            echo "Intento $intento de 20: backend todavía iniciando..."
+            echo "Intento $intento de 20: backend iniciando..."
             sleep 3
           done
 
-          echo "El backend no respondió después de 60 segundos."
-          compose ps backend
-          compose logs --tail=100 backend
+          echo "ERROR: El backend no respondió después de 60 segundos."
+
+          docker compose \
+            --env-file .env.aws \
+            -f docker-compose.aws.yml \
+            ps backend
+
+          docker compose \
+            --env-file .env.aws \
+            -f docker-compose.aws.yml \
+            logs --tail=100 backend
+
           exit 1
           EOF
