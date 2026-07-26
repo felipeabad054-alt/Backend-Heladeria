@@ -1,4 +1,4 @@
-name: Construir, publicar y probar SSH del Backend
+name: CI-CD Backend Heladeria
 
 on:
   push:
@@ -8,6 +8,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: backend-heladeria-production
+  cancel-in-progress: true
 
 jobs:
   build-and-push:
@@ -43,33 +47,13 @@ jobs:
     needs: build-and-push
 
     steps:
-      - name: Validar Secrets de EC2
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          if [ -z "$EC2_HOST" ]; then
-            echo "ERROR: El Secret EC2_HOST está vacío."
-            exit 1
-          fi
-
-          if [ -z "$EC2_SSH_KEY" ]; then
-            echo "ERROR: El Secret EC2_SSH_KEY está vacío."
-            exit 1
-          fi
-
-          echo "Los Secrets de EC2 están configurados."
-
       - name: Preparar acceso SSH
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
           install -m 700 -d ~/.ssh
-
-          printf '%s\n' "$EC2_SSH_KEY" \
-            > ~/.ssh/github_actions_backend
-
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/github_actions_backend
           chmod 600 ~/.ssh/github_actions_backend
 
           ssh-keyscan \
@@ -79,7 +63,7 @@ jobs:
 
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Probar conexión SSH con EC2
+      - name: Comprobar servidor EC2
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
@@ -101,5 +85,91 @@ jobs:
           test -d /home/ubuntu/Docker-Heladeria
 
           echo "Directorio Docker-Heladeria encontrado."
-          echo "Prueba SSH finalizada correctamente."
+          EOF
+
+  deploy-backend:
+    name: Desplegar Backend en EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test-ssh
+
+    steps:
+      - name: Preparar acceso SSH para despliegue
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/github_actions_backend
+          chmod 600 ~/.ssh/github_actions_backend
+
+          ssh-keyscan \
+            -T 10 \
+            -H "$EC2_HOST" \
+            >> ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Actualizar Backend en EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          ssh -T \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -i ~/.ssh/github_actions_backend \
+            "ubuntu@$EC2_HOST" 'bash -se' <<'EOF'
+          set -Eeuo pipefail
+
+          cd /home/ubuntu/Docker-Heladeria
+
+          compose() {
+            docker compose \
+              --env-file .env.aws \
+              -f docker-compose.aws.yml \
+              "$@"
+          }
+
+          echo "Descargando la imagen más reciente del Backend..."
+          compose pull backend
+
+          echo "Recreando únicamente el contenedor Backend..."
+          compose up \
+            -d \
+            --no-deps \
+            --force-recreate \
+            backend
+
+          echo "Esperando que la API esté disponible..."
+
+          for intento in $(seq 1 30); do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --connect-timeout 3 \
+              --max-time 5 \
+              http://localhost:5000/api/sabores \
+              > /dev/null 2>&1
+            then
+              echo "Backend funcionando correctamente."
+              compose ps backend
+
+              echo "Eliminando imágenes antiguas sin etiqueta..."
+              docker image prune -f
+
+              exit 0
+            fi
+
+            echo "Intento $intento de 30: Backend todavía iniciando..."
+            sleep 3
+          done
+
+          echo "ERROR: El Backend no respondió después de 90 segundos."
+
+          compose ps backend || true
+          compose logs --tail=150 backend || true
+
+          exit 1
           EOF
