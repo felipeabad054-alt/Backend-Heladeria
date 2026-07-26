@@ -1,4 +1,4 @@
-name: Construir y publicar Backend
+name: Construir, publicar y probar SSH del Backend
 
 on:
   push:
@@ -13,10 +13,11 @@ jobs:
   build-and-push:
     name: Publicar imagen en Docker Hub
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Descargar código del repositorio
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Configurar Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -34,3 +35,71 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/heladeria-backend:latest
+
+  test-ssh:
+    name: Probar conexión con EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: build-and-push
+
+    steps:
+      - name: Validar Secrets de EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          if [ -z "$EC2_HOST" ]; then
+            echo "ERROR: El Secret EC2_HOST está vacío."
+            exit 1
+          fi
+
+          if [ -z "$EC2_SSH_KEY" ]; then
+            echo "ERROR: El Secret EC2_SSH_KEY está vacío."
+            exit 1
+          fi
+
+          echo "Los Secrets de EC2 están configurados."
+
+      - name: Preparar acceso SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+
+          printf '%s\n' "$EC2_SSH_KEY" \
+            > ~/.ssh/github_actions_backend
+
+          chmod 600 ~/.ssh/github_actions_backend
+
+          ssh-keyscan \
+            -T 10 \
+            -H "$EC2_HOST" \
+            >> ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Probar conexión SSH con EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          ssh -T \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -i ~/.ssh/github_actions_backend \
+            "ubuntu@$EC2_HOST" 'bash -se' <<'EOF'
+          set -e
+
+          echo "Conexión SSH correcta."
+          echo "Usuario remoto: $(whoami)"
+          echo "Servidor remoto: $(hostname)"
+
+          docker --version
+          docker compose version
+
+          test -d /home/ubuntu/Docker-Heladeria
+
+          echo "Directorio Docker-Heladeria encontrado."
+          echo "Prueba SSH finalizada correctamente."
+          EOF
