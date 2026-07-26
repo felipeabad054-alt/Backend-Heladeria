@@ -19,6 +19,7 @@ async function iniciarServidor() {
   } catch (error) {
     console.error("❌ Error al conectar PostgreSQL");
     console.error(error);
+    process.exit(1);
   }
 }
 
